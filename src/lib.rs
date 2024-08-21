@@ -22,6 +22,9 @@ use solana_program::alt_bn128::prelude::{
 };
 use solana_program::entrypoint::ProgramResult;
 use solana_program::program_error::ProgramError;
+use poly_utils::{lagrange_poly, evaluate_poly};
+use rayon::prelude::*;
+
 
 pub enum Risc0SolanaError {
     G1CompressionError,
@@ -95,17 +98,12 @@ impl<'a, const N_PUBLIC: usize> Verifier<'a, N_PUBLIC> {
     }
 
     fn prepare_public_inputs(&self) -> Result<[u8; 64], Risc0SolanaError> {
-        let mut prepared = self.vk.vk_ic[0];
+        let mut result = self.vk.vk_ic[0];
         for (i, input) in self.public.inputs.iter().enumerate() {
-            let mul_res =
-                alt_bn128_multiplication(&[&self.vk.vk_ic[i + 1][..], &input[..]].concat())
-                    .map_err(|_| Risc0SolanaError::ArithmeticError)?;
-            prepared = alt_bn128_addition(&[&mul_res[..], &prepared[..]].concat())
-                .unwrap()
-                .try_into()
-                .map_err(|_| Risc0SolanaError::ArithmeticError)?;
+            let mut temp = ecmul(&self.vk.vk_ic[i + 1], mod_scalar(*input as i64));
+            result = ecadd(&result, &temp);
         }
-        Ok(prepared)
+        Ok(result)
     }
 
     fn perform_pairing(&self, prepared_public: &[u8; 64]) -> ProgramResult {
@@ -120,16 +118,18 @@ impl<'a, const N_PUBLIC: usize> Verifier<'a, N_PUBLIC> {
             self.vk.vk_beta_g2.as_slice(),
         ]
         .concat();
-
-        let pairing_res =
-            alt_bn128_pairing(&pairing_input).map_err(|_| Risc0SolanaError::PairingError)?;
-
+    
+        let pairing_res = alt_bn128_pairing(&pairing_input)
+            .map_err(|_| Risc0SolanaError::PairingError)?;
+    
         if pairing_res[31] != 1 {
             return Err(Risc0SolanaError::VerificationError.into());
         }
-
+    
         Ok(())
     }
+
+    
 }
 
 pub fn public_inputs(
@@ -174,6 +174,25 @@ fn to_fixed_array(input: &[u8]) -> [u8; 32] {
 
     fixed_array[start_index..].copy_from_slice(input);
     fixed_array
+}
+
+fn mod_scalar(a: i64) -> u64 {
+    let n = bn128::CURVE_ORDER;
+    ((n as i128 - (-a as i128 % n as i128)) % n as i128) as u64
+}
+
+fn ecmul(point: &[u8; 64], scalar: u64) -> [u8; 64] {
+    alt_bn128_multiplication(&[point, &scalar.to_be_bytes()].concat())
+        .unwrap()
+        .try_into()
+        .unwrap()
+}
+
+fn ecadd(a: &[u8; 64], b: &[u8; 64]) -> [u8; 64] {
+    alt_bn128_addition(&[a, b].concat())
+        .unwrap()
+        .try_into()
+        .unwrap()
 }
 
 #[cfg(not(target_os = "solana"))]
